@@ -660,8 +660,7 @@ namespace Oxide.Plugins
                 SpawnTime  = Time.realtimeSinceStartup
             };
 
-            SpawnDecorations(preset, site);
-            SpawnCrates(preset, site);
+            SpawnLayout(preset, site);
             SpawnNPCs(preset, site);
             SpawnMarkers(preset, site);
 
@@ -745,43 +744,121 @@ namespace Oxide.Plugins
             }
         }
 
-        private void SpawnCrates(SitePreset preset, ActiveSite site)
+        // ─── Layout system ────────────────────────────────────────────────────────
+
+        private void SpawnLayout(SitePreset preset, ActiveSite site)
         {
-            int totalCrates = preset.Crates.Sum(c => c.Count);
-            int idx = 0;
-            foreach (var def in preset.Crates)
+            float facing = UnityEngine.Random.Range(0f, 360f);
+            switch (UnityEngine.Random.Range(0, 3))
             {
-                for (int i = 0; i < def.Count; i++)
-                {
-                    var pos = RingPosition(site.Center, preset.Radius * 0.45f, idx++, totalCrates);
-                    pos.y = GetGroundHeight(pos) + 0.05f;
-
-                    var entity = GameManager.server.CreateEntity(def.Prefab, pos,
-                        Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f));
-                    if (entity == null) continue;
-                    entity.Spawn();
-
-                    if (entity is StorageContainer sc)
-                    {
-                        site.CrateIds.Add(sc.net.ID.Value);
-                        site.Entities.Add(sc);
-                    }
-                }
+                case 0:  LayoutCamp(preset, site, facing);      break;
+                case 1:  LayoutFortified(preset, site, facing); break;
+                default: LayoutOutpost(preset, site, facing);   break;
             }
         }
 
-        private void SpawnDecorations(SitePreset preset, ActiveSite site)
+        // Camp: central anchor, crates clustered nearby, barricades arcing behind them
+        private void LayoutCamp(SitePreset preset, ActiveSite site, float facing)
         {
-            for (int i = 0; i < preset.Decorations.Count; i++)
-            {
-                var pos = RingPosition(site.Center, preset.Radius * 0.7f, i, preset.Decorations.Count);
-                pos.y = GetGroundHeight(pos) + 0.05f;
+            float r    = preset.Radius;
+            var   decs = new List<string>(preset.Decorations);
 
-                var entity = GameManager.server.CreateEntity(preset.Decorations[i], pos,
-                    Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f));
-                if (entity == null) continue;
-                entity.Spawn();
-                site.Entities.Add(entity);
+            string centralPrefab = decs.Count > 0 ? decs[0] : Prefabs.Campfire;
+            TryPlaceEntity(centralPrefab, site, Jitter(site.Center, 1.5f));
+            if (decs.Count > 0) decs.RemoveAt(0);
+
+            PlaceCratesNear(preset.Crates, site, OffsetPos(site.Center, facing, r * 0.18f), r * 0.28f);
+
+            float arcHalf = Mathf.Clamp(decs.Count * 14f, 25f, 80f);
+            for (int i = 0; i < decs.Count; i++)
+            {
+                float t     = decs.Count > 1 ? (float)i / (decs.Count - 1) : 0.5f;
+                float angle = (facing + 180f) - arcHalf + arcHalf * 2f * t + UnityEngine.Random.Range(-8f, 8f);
+                var   pos   = SafeGroundPos(OffsetPos(site.Center, angle, r * UnityEngine.Random.Range(0.44f, 0.62f)));
+                if (pos != Vector3.zero) TryPlaceEntity(decs[i], site, pos);
+            }
+        }
+
+        // Fortified: front barricade wall facing outward, crates sheltered behind it
+        private void LayoutFortified(SitePreset preset, ActiveSite site, float facing)
+        {
+            float r          = preset.Radius;
+            var   decs       = new List<string>(preset.Decorations);
+            int   frontCount = Mathf.CeilToInt(decs.Count * 0.65f);
+            int   backCount  = decs.Count - frontCount;
+
+            float arcHalf = Mathf.Clamp(frontCount * 10f, 20f, 55f);
+            for (int i = 0; i < frontCount; i++)
+            {
+                float t     = frontCount > 1 ? (float)i / (frontCount - 1) : 0.5f;
+                float angle = facing - arcHalf + arcHalf * 2f * t + UnityEngine.Random.Range(-5f, 5f);
+                var   pos   = SafeGroundPos(OffsetPos(site.Center, angle, r * UnityEngine.Random.Range(0.42f, 0.55f)));
+                if (pos != Vector3.zero) TryPlaceEntity(decs[i], site, pos);
+            }
+
+            PlaceCratesNear(preset.Crates, site, OffsetPos(site.Center, facing + 180f, r * 0.08f), r * 0.3f);
+
+            for (int i = 0; i < backCount; i++)
+            {
+                float t     = backCount > 1 ? (float)i / (backCount - 1) : 0.5f;
+                float angle = (facing + 180f) - arcHalf + arcHalf * 2f * t + UnityEngine.Random.Range(-5f, 5f);
+                var   pos   = SafeGroundPos(OffsetPos(site.Center, angle, r * UnityEngine.Random.Range(0.40f, 0.52f)));
+                if (pos != Vector3.zero) TryPlaceEntity(decs[frontCount + i], site, pos);
+            }
+        }
+
+        // Outpost: barricades clustered at 3–4 corners, crates in the middle
+        private void LayoutOutpost(SitePreset preset, ActiveSite site, float facing)
+        {
+            float r       = preset.Radius;
+            var   decs    = new List<string>(preset.Decorations);
+            int   corners = UnityEngine.Random.Range(3, 5);
+
+            for (int i = 0; i < decs.Count; i++)
+            {
+                float cornerAngle  = facing + (360f / corners) * (i % corners) + UnityEngine.Random.Range(-12f, 12f);
+                var   cornerCenter = OffsetPos(site.Center, cornerAngle, r * UnityEngine.Random.Range(0.45f, 0.60f));
+                var   pos          = SafeGroundPos(Jitter(cornerCenter, 2.2f));
+                if (pos != Vector3.zero) TryPlaceEntity(decs[i], site, pos);
+            }
+
+            PlaceCratesNear(preset.Crates, site, Jitter(site.Center, r * 0.12f), r * 0.28f);
+        }
+
+        // ─── Placement helpers ────────────────────────────────────────────────────
+
+        private void TryPlaceEntity(string prefab, ActiveSite site, Vector3 pos)
+        {
+            pos.y = GetGroundHeight(pos) + 0.05f;
+            var e = GameManager.server.CreateEntity(prefab, pos,
+                Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f));
+            if (e == null) return;
+            e.Spawn();
+            site.Entities.Add(e);
+        }
+
+        private void PlaceCrate(string prefab, ActiveSite site, Vector3 pos)
+        {
+            pos.y = GetGroundHeight(pos) + 0.05f;
+            var e = GameManager.server.CreateEntity(prefab, pos,
+                Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f));
+            if (e == null) return;
+            e.Spawn();
+            if (e is StorageContainer sc) { site.CrateIds.Add(sc.net.ID.Value); site.Entities.Add(sc); }
+        }
+
+        private void PlaceCratesNear(List<CrateDef> crates, ActiveSite site, Vector3 anchor, float spread)
+        {
+            foreach (var def in crates)
+            {
+                for (int i = 0; i < def.Count; i++)
+                {
+                    Vector3 pos = Vector3.zero;
+                    for (int attempt = 0; attempt < 8 && pos == Vector3.zero; attempt++)
+                        pos = SafeGroundPos(OffsetPos(anchor, UnityEngine.Random.Range(0f, 360f),
+                                                      spread * UnityEngine.Random.Range(0.1f, 1f)));
+                    if (pos != Vector3.zero) PlaceCrate(def.Prefab, site, pos);
+                }
             }
         }
 
@@ -917,6 +994,7 @@ namespace Oxide.Plugins
                 if (IsNearPlayer(pos))        continue;
                 if (IsNearSite(pos))          continue;
                 if (IsInsideMonument(pos))    continue;
+                if (IsOnRoad(pos))            continue;
 
                 return pos;
             }
@@ -962,6 +1040,39 @@ namespace Oxide.Plugins
                 if (mon.IsInBounds(pos)) return true;
             return false;
         }
+
+        private bool IsOnRoad(Vector3 pos)
+        {
+            if (TerrainMeta.Path?.Roads == null) return false;
+            foreach (var road in TerrainMeta.Path.Roads)
+            {
+                float hw  = road.Width * 0.5f + 3f;
+                float hw2 = hw * hw;
+                foreach (var pt in road.Path.Points)
+                {
+                    float dx = pos.x - pt.x, dz = pos.z - pt.z;
+                    if (dx * dx + dz * dz < hw2) return true;
+                }
+            }
+            return false;
+        }
+
+        private Vector3 SafeGroundPos(Vector3 pos)
+        {
+            pos.y = GetGroundHeight(pos);
+            if (IsInWater(pos) || IsOnRoad(pos)) return Vector3.zero;
+            return pos;
+        }
+
+        private static Vector3 OffsetPos(Vector3 origin, float angleDeg, float dist)
+        {
+            float rad = angleDeg * Mathf.Deg2Rad;
+            return new Vector3(origin.x + Mathf.Sin(rad) * dist, origin.y, origin.z + Mathf.Cos(rad) * dist);
+        }
+
+        private static Vector3 Jitter(Vector3 pos, float radius)
+            => pos + new Vector3(UnityEngine.Random.Range(-radius, radius), 0f,
+                                 UnityEngine.Random.Range(-radius, radius));
 
         private Vector3 RingPosition(Vector3 center, float radius, int index, int total)
         {
